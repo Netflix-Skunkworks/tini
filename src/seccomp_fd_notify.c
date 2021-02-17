@@ -62,7 +62,18 @@ static int seccomp(unsigned int operation, unsigned int flags, void *args)
 
 /* For the x32 ABI, all system call numbers have bit 30 set */
 #define X32_SYSCALL_BIT         0x40000000
-struct sock_filter perf_filter[] = {
+
+/* install_notify_filter() install_notify_filter a seccomp filter that generates user-space
+   notifications (SECCOMP_RET_USER_NOTIF) when the process calls mkdir(2); the
+   filter allows all other system calls.
+
+   The function return value is a file descriptor from which the user-space
+   notifications can be fetched. 
+*/
+static int install_notify_filter(void) {
+	struct sock_fprog prog = {0};
+	
+	struct sock_filter perf_filter[] = {
 		/* X86_64_CHECK_ARCH_AND_LOAD_SYSCALL_NR */
 		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, arch))),
 		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 0, 2),
@@ -98,7 +109,7 @@ struct sock_filter net_perf_filter[] = {
 		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_ioctl, 0, 1),
 		BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_USER_NOTIF),
 
-        /* Trap sendto */
+		/* Trap sendto */
 		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_sendto, 0, 1),
 		BPF_STMT(BPF_RET + BPF_K, SECCOMP_RET_USER_NOTIF),
 		/* Trap sendmsg */
@@ -113,28 +124,16 @@ struct sock_filter net_perf_filter[] = {
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
 	};
 
-
-
-/* install_notify_filter() install_notify_filter a seccomp filter that generates user-space
-   notifications (SECCOMP_RET_USER_NOTIF) when the process calls mkdir(2); the
-   filter allows all other system calls.
-
-   The function return value is a file descriptor from which the user-space
-   notifications can be fetched. */
-static int install_notify_filter(void) {
-	struct sock_filter *filter;
-
 	char *is_handle_net = getenv("TITUS_SECCOMP_AGENT_HANDLE_NET_SYSCALLS");
 	if (strcmp(is_handle_net, "1") == 0) {
-		filter = net_perf_filter;
+		prog.filter = net_perf_filter;
+		prog.len = 
+			(unsigned short)(sizeof(net_perf_filter) / sizeof(net_perf_filter[0]));
 	} else {
-		filter = perf_filter;
+		prog.filter = perf_filter;
+		prog.len = 
+			(unsigned short)(sizeof(perf_filter) / sizeof(perf_filter[0]));
 	}
-
-	struct sock_fprog prog = {
-		.len = (unsigned short) (sizeof(filter) / sizeof(filter[0])),
-		.filter = filter,
-	};
 
 	/* Install the filter with the SECCOMP_FILTER_FLAG_NEW_LISTENER flag; as
 	   a result, seccomp() returns a notification file descriptor. */
@@ -200,7 +199,6 @@ void * catch_send_fd(void *fd_arg)
 		return NULL;
 	}
 
-	//
 	epfd = epoll_create(EPOLL_IGNORED_VAL);
 	if (epfd == -1) {
 		PRINT_WARNING("epoll_create error");
@@ -214,7 +212,6 @@ void * catch_send_fd(void *fd_arg)
 		return NULL;
 	}
 
-	/* Loop handling notifications */
 	for (;;) {
 		/* Wait for next notification, returning info in '*req' */
 		memset(req, 0, sizeof(*req));
